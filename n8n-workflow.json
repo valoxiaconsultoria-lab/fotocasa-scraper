@@ -1,0 +1,322 @@
+{
+  "name": "Captacion Particulares Beniroig (scraper propio)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "daysInterval": 4,
+              "triggerAtHour": 18
+            }
+          ]
+        }
+      },
+      "id": "654ab722-2a97-444b-94a5-5d58e83dc965",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-2864, 304]
+    },
+    {
+      "parameters": {},
+      "id": "2aff13e6-f2c6-4f7c-a2a2-5871e6e75fed",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [-2752, 528]
+    },
+    {
+      "parameters": {
+        "fromEmail": "noreply@beniroig.es",
+        "toEmail": "info@beniroig.es",
+        "subject": "⚠️ Error en Workflow Captación Beniroig",
+        "emailFormat": "text",
+        "text": "=Error en workflow captación.\n\nError: {{ $json.error.message }}\nNodo: {{ $json.execution.lastNodeExecuted }}\nFecha: {{ new Date().toISOString() }}",
+        "options": {}
+      },
+      "id": "d5b02c67-019a-43c0-837b-7c3d96ea8456",
+      "name": "Email Error",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [-2528, 528],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "=https://TU-DOMINIO.railway.app/scrape?api_key=beniroig2025&maxPages=10&url=https://www.fotocasa.es/es/comprar/viviendas/valencia-capital/todas-las-zonas/l?ord=desc",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "http-scraper-call",
+      "name": "HTTP Request - Scraper Propio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [-2624, 304]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Los datos vienen de nuestro scraper propio\n// El scraper devuelve { success, total, items: [...] }\n\nconst response = items[0].json;\n\nif (!response.success || !response.items || response.items.length === 0) {\n  console.log('[n8n] Scraper no devolvió items');\n  return [{ json: { match: 0 } }];\n}\n\nconsole.log(`[n8n] Items recibidos del scraper: ${response.items.length}`);\n\n// Mapear y filtrar solo particulares de Valencia\nconst owners = response.items\n  .filter(item => item.isAgency === false)\n  .map(item => ({\n    json: {\n      // ── Identificación ──\n      id:              String(item.id || ''),\n      title:           item.title || '',\n      url:             item.url   || '',\n\n      // ── Precio ──\n      price:           item.price   || null,\n      surface:         item.surface || null,\n      rooms:           item.rooms   || null,\n      bathrooms:       item.bathrooms || null,\n\n      // ── Contacto (se rellena en el step de detalle) ──\n      email:           item.email || '',\n      phone:           item.phone || '',\n      contactName:     item.contactName || '',\n      email_found:     item.email ? true : false,\n      email_enviado:   false,\n\n      // ── Metadata ──\n      isAgency:        false,\n      source:          'fotocasa-propio',\n      scrapedAt:       new Date().toISOString(),\n\n      match: 1\n    }\n  }));\n\n// Eliminar duplicados\nconst seen = new Set();\nconst unique = owners.filter(item => {\n  if (!item.json.id || seen.has(item.json.id)) return false;\n  seen.add(item.json.id);\n  return true;\n});\n\nconsole.log(`[n8n] Particulares únicos: ${unique.length}`);\n\nif (unique.length === 0) {\n  return [{ json: { match: 0 } }];\n}\n\nreturn unique;"
+      },
+      "id": "ff4c9e1a-af7c-4020-8c58-8aaa5b7262de",
+      "name": "Code - Procesar Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-2350, 304]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "check-match",
+              "leftValue": "={{ $json.match }}",
+              "rightValue": 1,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-has-owners",
+      "name": "If - ¿Hay particulares?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-2100, 304]
+    },
+    {
+      "parameters": {
+        "options": { "reset": false }
+      },
+      "id": "b85fefa4-f0cd-4739-b962-f6295b6cc185",
+      "name": "Loop Over Items",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-1860, 200]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appfBrzZncguLOzQ3",
+          "mode": "list",
+          "cachedResultName": "Beniroig"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblZMa3dL4DMKyk9z",
+          "mode": "list",
+          "cachedResultName": "Datos scraper"
+        },
+        "filterByFormula": "={id} = '{{ $json.id }}'",
+        "options": {}
+      },
+      "id": "ba2ce224-e132-49df-81e9-a5b5227ae37e",
+      "name": "Airtable - Buscar Duplicado",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [-1620, 200],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "MfmN0kIQqqNWausR",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "check-not-exists",
+              "leftValue": "={{ $json.fields?.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-not-exists",
+      "name": "If - ¿Es nuevo?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-1380, 200]
+    },
+    {
+      "parameters": {
+        "url": "=https://TU-DOMINIO.railway.app/detail?api_key=beniroig2025&url={{ encodeURIComponent($('Loop Over Items').item.json.url) }}",
+        "options": {
+          "timeout": 30000
+        },
+        "continueOnFail": true
+      },
+      "id": "http-detail",
+      "name": "HTTP Request - Detalle anuncio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [-1140, 120]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combinar datos del item original con los del detalle\nconst original = $('Loop Over Items').item.json;\nconst detail   = items[0].json;\n\nreturn [{\n  json: {\n    ...original,\n    email:       detail.email       || original.email || '',\n    phone:       detail.phone       || original.phone || '',\n    contactName: detail.agentName   || original.contactName || '',\n    address:     detail.address     || '',\n    description: detail.description || '',\n    email_found: (detail.email || original.email) ? true : false\n  }\n}];"
+      },
+      "id": "code-merge-detail",
+      "name": "Code - Fusionar datos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-900, 120]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "appfBrzZncguLOzQ3",
+          "mode": "list",
+          "cachedResultName": "Beniroig"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblZMa3dL4DMKyk9z",
+          "mode": "list",
+          "cachedResultName": "Datos scraper"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id":            "={{ $json.id }}",
+            "url":           "={{ $json.url }}",
+            "title":         "={{ $json.title }}",
+            "contactName":   "={{ $json.contactName }}",
+            "phone":         "={{ $json.phone }}",
+            "email":         "={{ $json.email }}",
+            "email_found":   "={{ $json.email_found }}",
+            "email_enviado": "={{ $json.email_enviado }}",
+            "price":         "={{ $json.price }}",
+            "surface":       "={{ $json.surface }}",
+            "rooms":         "={{ $json.rooms }}",
+            "bathrooms":     "={{ $json.bathrooms }}",
+            "address":       "={{ $json.address }}",
+            "description":   "={{ $json.description }}",
+            "source":        "fotocasa-propio",
+            "scrapedAt":     "={{ $json.scrapedAt }}"
+          },
+          "matchingColumns": ["id"],
+          "schema": [
+            { "id": "id",            "displayName": "id",            "required": false, "defaultMatch": true,  "display": true, "type": "string",  "readOnly": false, "removed": false },
+            { "id": "url",           "displayName": "url",           "required": false, "defaultMatch": false, "display": true, "type": "string",  "readOnly": false, "removed": false },
+            { "id": "title",         "displayName": "title",         "required": false, "defaultMatch": false, "display": true, "type": "string",  "readOnly": false, "removed": false },
+            { "id": "contactName",   "displayName": "contactName",   "required": false, "defaultMatch": false, "display": true, "type": "string",  "readOnly": false, "removed": false },
+            { "id": "phone",         "displayName": "phone",         "required": false, "defaultMatch": false, "display": true, "type": "string",  "readOnly": false, "removed": false },
+            { "id": "email",         "displayName": "email",         "required": false, "defaultMatch": false, "display": true, "type": "string",  "readOnly": false, "removed": false },
+            { "id": "email_found",   "displayName": "email_found",   "required": false, "defaultMatch": false, "display": true, "type": "boolean", "readOnly": false, "removed": false },
+            { "id": "email_enviado", "displayName": "email_enviado", "required": false, "defaultMatch": false, "display": true, "type": "boolean", "readOnly": false, "removed": false },
+            { "id": "price",         "displayName": "price",         "required": false, "defaultMatch": false, "display": true, "type": "number",  "readOnly": false, "removed": false },
+            { "id": "surface",       "displayName": "surface",       "required": false, "defaultMatch": false, "display": true, "type": "number",  "readOnly": false, "removed": false },
+            { "id": "rooms",         "displayName": "rooms",         "required": false, "defaultMatch": false, "display": true, "type": "number",  "readOnly": false, "removed": false },
+            { "id": "bathrooms",     "displayName": "bathrooms",     "required": false, "defaultMatch": false, "display": true, "type": "number",  "readOnly": false, "removed": false },
+            { "id": "address",       "displayName": "address",       "required": false, "defaultMatch": false, "display": true, "type": "string",  "readOnly": false, "removed": false },
+            { "id": "description",   "displayName": "description",   "required": false, "defaultMatch": false, "display": true, "type": "string",  "readOnly": false, "removed": false },
+            { "id": "source",        "displayName": "source",        "required": false, "defaultMatch": false, "display": true, "type": "string",  "readOnly": false, "removed": false },
+            { "id": "scrapedAt",     "displayName": "scrapedAt",     "required": false, "defaultMatch": false, "display": true, "type": "string",  "readOnly": false, "removed": false }
+          ]
+        },
+        "options": {}
+      },
+      "id": "6d5c5ca5-9eb1-43e4-93ec-68161615d12b",
+      "name": "Airtable - Guardar Nuevo",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [-660, 120],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "MfmN0kIQqqNWausR",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [[{ "node": "HTTP Request - Scraper Propio", "type": "main", "index": 0 }]]
+    },
+    "Error Trigger": {
+      "main": [[{ "node": "Email Error", "type": "main", "index": 0 }]]
+    },
+    "HTTP Request - Scraper Propio": {
+      "main": [[{ "node": "Code - Procesar Items", "type": "main", "index": 0 }]]
+    },
+    "Code - Procesar Items": {
+      "main": [[{ "node": "If - ¿Hay particulares?", "type": "main", "index": 0 }]]
+    },
+    "If - ¿Hay particulares?": {
+      "main": [
+        [{ "node": "Loop Over Items", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [],
+        [{ "node": "Airtable - Buscar Duplicado", "type": "main", "index": 0 }]
+      ]
+    },
+    "Airtable - Buscar Duplicado": {
+      "main": [[{ "node": "If - ¿Es nuevo?", "type": "main", "index": 0 }]]
+    },
+    "If - ¿Es nuevo?": {
+      "main": [
+        [{ "node": "HTTP Request - Detalle anuncio", "type": "main", "index": 0 }],
+        [{ "node": "Loop Over Items", "type": "main", "index": 0 }]
+      ]
+    },
+    "HTTP Request - Detalle anuncio": {
+      "main": [[{ "node": "Code - Fusionar datos", "type": "main", "index": 0 }]]
+    },
+    "Code - Fusionar datos": {
+      "main": [[{ "node": "Airtable - Guardar Nuevo", "type": "main", "index": 0 }]]
+    },
+    "Airtable - Guardar Nuevo": {
+      "main": [[{ "node": "Loop Over Items", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "meta": {
+    "instanceId": "8b34964bd6e7fdd569c47713286325f2150e3cebd4be101b850d241abfd13b0d"
+  },
+  "tags": [
+    { "id": "12ScFunOC3x8HuOF", "name": "valoxia" },
+    { "id": "7Ct5AZhKoYRr3o3I", "name": "beniroig" },
+    { "id": "ATDWzYzSj92R1hHX", "name": "captacion" }
+  ]
+}
