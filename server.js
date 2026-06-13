@@ -10,7 +10,7 @@ const API_KEY = process.env.API_KEY || "sk-beniroig-2025";
 
 // ── Middleware autenticación ──
 function auth(req, res, next) {
-  const key = req.headers["x-api-key"] || req.query.api_key;
+  const key = req.headers["x-api-key"] || req.query.token;
   if (key !== API_KEY) {
     return res.status(401).json({ error: "Unauthorized" });
   }
