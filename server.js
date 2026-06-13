@@ -6,7 +6,7 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.API_KEY || "beniroig2025";
+const API_KEY = process.env.API_KEY || "sk-beniroig-2025";
 
 // ── Middleware autenticación ──
 function auth(req, res, next) {
