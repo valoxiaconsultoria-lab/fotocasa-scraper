@@ -1,302 +1,147 @@
 const express = require("express");
-const puppeteer = require("puppeteer-core");
-const chromium = require("@sparticuz/chromium");
+const fetch = require("node-fetch");
+const cheerio = require("cheerio");
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.API_KEY || "sk-beniroig-2025";
 
-// ── Middleware autenticación ──
-function auth(req, res, next) {
-  const key = req.headers["x-api-key"] || req.query.token;
-  if (key !== API_KEY) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  next();
+const HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "es-ES,es;q=0.9",
+  "Referer": "https://www.fotocasa.es"
+};
+
+function wait(ms) {
+  return new Promise(r => setTimeout(r, ms));
 }
 
-// ── Health check ──
+// Health check
 app.get("/", (req, res) => {
-  res.json({ status: "ok", service: "fotocasa-scraper", version: "1.0.0" });
+  res.json({ status: "ok", service: "fotocasa-scraper-lite", version: "3.0.0" });
 });
 
-// ── Endpoint principal de scraping ──
-app.get("/scrape", auth, async (req, res) => {
-  const {
-    url = "https://www.fotocasa.es/es/comprar/viviendas/valencia-capital/todas-las-zonas/l?ord=desc",
-    maxPages = 5,
-  } = req.query;
+// Scraping sin autenticación
+app.get("/scrape", async (req, res) => {
+  const maxPages = parseInt(req.query.maxPages) || 3;
+  const baseUrl = "https://www.fotocasa.es/es/comprar/viviendas/valencia-capital/todas-las-zonas/l?ord=desc";
 
-  console.log(`[Scraper] Iniciando scraping: ${url} | maxPages: ${maxPages}`);
+  console.log(`[Scraper] Iniciando | maxPages: ${maxPages}`);
+  const results = [];
 
-  let browser;
   try {
-    browser = await puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
-    });
+    for (let page = 1; page <= maxPages; page++) {
+      const url = page === 1 ? baseUrl : `${baseUrl}&page=${page}`;
+      console.log(`[Scraper] Página ${page}: ${url}`);
 
-    const results = [];
-    let currentUrl = url;
+      const response = await fetch(url, { headers: HEADERS });
 
-    for (let page = 1; page <= parseInt(maxPages); page++) {
-      console.log(`[Scraper] Página ${page}: ${currentUrl}`);
+      if (!response.ok) {
+        console.log(`[Scraper] Error HTTP ${response.status}`);
+        break;
+      }
 
-      const tab = await browser.newPage();
+      const html = await response.text();
+      const $ = cheerio.load(html);
+      let pageItems = [];
 
-      // Headers para parecer navegador real
-      await tab.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      );
-      await tab.setExtraHTTPHeaders({
-        "Accept-Language": "es-ES,es;q=0.9",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        Referer: "https://www.fotocasa.es",
-      });
-
-      // Bloquear imágenes y fonts para ir más rápido
-      await tab.setRequestInterception(true);
-      tab.on("request", (req) => {
-        const type = req.resourceType();
-        if (["image", "font", "media", "stylesheet"].includes(type)) {
-          req.abort();
-        } else {
-          req.continue();
+      $("script").each((i, el) => {
+        const content = $(el).html() || "";
+        if (content.includes('"clientType"') || content.includes('"realEstates"')) {
+          try {
+            const jsonMatch = content.match(/\{.+\}/s);
+            if (jsonMatch) {
+              const data = JSON.parse(jsonMatch[0]);
+              const listings = data?.realEstates || data?.listings || data?.results || [];
+              if (Array.isArray(listings) && listings.length > 0) {
+                pageItems = listings;
+              }
+            }
+          } catch (e) {}
         }
       });
 
-      await tab.goto(currentUrl, {
-        waitUntil: "networkidle2",
-        timeout: 30000,
-      });
-
-      // Esperar a que carguen los anuncios
-      await tab.waitForSelector('[class*="re-CardPackPrimary"], [class*="re-Card"]', {
-        timeout: 15000,
-      }).catch(() => console.log("[Scraper] No se encontraron cards, puede ser captcha"));
-
-      // Extraer datos de los anuncios
-      const pageData = await tab.evaluate(() => {
-        const listings = [];
-
-        // Buscar todos los anuncios en la página
-        const cards = document.querySelectorAll(
-          '[class*="re-CardPackPrimary"], [class*="re-Card-bodyInfo"], article[class*="re-Card"]'
-        );
-
-        cards.forEach((card) => {
+      if (pageItems.length === 0) {
+        $("article, [class*='Card']").each((i, el) => {
           try {
-            // ID del anuncio
-            const linkEl = card.querySelector("a[href*='/inmueble/']");
-            const href = linkEl?.getAttribute("href") || "";
+            const card = $(el);
+            const link = card.find("a[href*='/inmueble/']").first();
+            const href = link.attr("href") || "";
             const idMatch = href.match(/\/inmueble\/(\d+)\//);
-            const id = idMatch ? idMatch[1] : "";
-            if (!id) return;
-
-            // URL completa
-            const url = href.startsWith("http")
-              ? href
-              : `https://www.fotocasa.es${href}`;
-
-            // Precio
-            const priceEl = card.querySelector(
-              '[class*="re-CardPrice"], [class*="re-Price"]'
-            );
-            const priceText = priceEl?.textContent?.replace(/\D/g, "") || "";
-            const price = priceText ? parseInt(priceText) : null;
-
-            // Superficie, habitaciones, baños
-            const features = card.querySelectorAll(
-              '[class*="re-CardFeatures-feature"], [class*="re-Feature"]'
-            );
-            let surface = null,
-              rooms = null,
-              bathrooms = null;
-            features.forEach((f) => {
-              const text = f.textContent.trim();
-              if (text.includes("m²")) surface = parseInt(text);
-              else if (text.includes("hab")) rooms = parseInt(text);
-              else if (text.includes("baño")) bathrooms = parseInt(text);
-            });
-
-            // Título / dirección
-            const titleEl = card.querySelector(
-              '[class*="re-CardTitle"], [class*="re-Card-title"]'
-            );
-            const title = titleEl?.textContent?.trim() || "";
-
-            // Tipo de vendedor — buscar si pone "Particular"
-            const agentEl = card.querySelector(
-              '[class*="re-CardAgent"], [class*="re-Agent"]'
-            );
-            const agentText = agentEl?.textContent?.toLowerCase() || "";
-            const isParticular =
-              agentText.includes("particular") ||
-              agentText.includes("propietario") ||
-              card.innerHTML.toLowerCase().includes("particular");
-
-            listings.push({
-              id,
-              url,
-              title,
-              price,
-              surface,
-              rooms,
-              bathrooms,
-              isAgency: !isParticular,
-              source: "fotocasa",
-            });
-          } catch (e) {
-            // Skip anuncio con error
-          }
+            if (!idMatch) return;
+            const id = idMatch[1];
+            const url = href.startsWith("http") ? href : `https://www.fotocasa.es${href}`;
+            const priceText = card.find("[class*='Price']").first().text().trim();
+            const price = parseInt(priceText.replace(/\D/g, "")) || null;
+            const title = card.find("h2, h3, [class*='Title']").first().text().trim();
+            const cardText = card.text().toLowerCase();
+            const isParticular = cardText.includes("particular") || cardText.includes("propietario");
+            pageItems.push({ id, url, title, price, isAgency: !isParticular });
+          } catch (e) {}
         });
-
-        // URL de siguiente página
-        const nextEl = document.querySelector(
-          'a[class*="sui-PaginationBasic-item--next"], a[rel="next"]'
-        );
-        const nextUrl = nextEl?.href || null;
-
-        return { listings, nextUrl };
-      });
-
-      results.push(...pageData.listings);
-      console.log(
-        `[Scraper] Página ${page}: ${pageData.listings.length} anuncios encontrados`
-      );
-
-      await tab.close();
-
-      // Si no hay siguiente página, parar
-      if (!pageData.nextUrl) {
-        console.log("[Scraper] No hay más páginas");
-        break;
       }
-      currentUrl = pageData.nextUrl;
 
-      // Espera entre páginas para no ser bloqueado
-      await new Promise((r) => setTimeout(r, 2000 + Math.random() * 2000));
+      results.push(...pageItems.filter(i => i.id));
+
+      if (page < maxPages) await wait(3000 + Math.random() * 2000);
     }
 
-    // Filtrar solo particulares de Valencia
-    const particulares = results.filter((item) => {
-      if (item.isAgency) return false;
-      return true; // Ya filtramos por Valencia en la URL
-    });
-
-    // Eliminar duplicados por id
+    const particulares = results.filter(i => i.isAgency === false || i.clientType === "owner");
     const seen = new Set();
-    const unique = particulares.filter((item) => {
-      if (!item.id || seen.has(item.id)) return false;
-      seen.add(item.id);
+    const unique = particulares.filter(i => {
+      const id = String(i.id || "");
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
       return true;
     });
 
-    console.log(
-      `[Scraper] Total: ${results.length} | Particulares: ${unique.length}`
-    );
+    console.log(`[Scraper] Total: ${results.length} | Particulares: ${unique.length}`);
+    res.json({ success: true, total: unique.length, items: unique });
 
-    res.json({
-      success: true,
-      total: unique.length,
-      pages_scraped: parseInt(maxPages),
-      items: unique,
-    });
   } catch (error) {
     console.error("[Scraper] Error:", error.message);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  } finally {
-    if (browser) await browser.close();
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// ── Endpoint para scraping de detalle de un anuncio ──
-app.get("/detail", auth, async (req, res) => {
+// Detalle anuncio
+app.get("/detail", async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: "url param required" });
 
-  let browser;
   try {
-    browser = await puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
-    });
+    const response = await fetch(url, { headers: HEADERS });
+    const html = await response.text();
+    const $ = cheerio.load(html);
 
-    const tab = await browser.newPage();
-    await tab.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    );
-    await tab.setRequestInterception(true);
-    tab.on("request", (req) => {
-      if (["image", "font", "media"].includes(req.resourceType())) req.abort();
-      else req.continue();
-    });
+    let email = "";
+    let phone = "";
+    let contactName = "";
 
-    await tab.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
-
-    const detail = await tab.evaluate(() => {
-      // Intentar extraer email del JSON incrustado en la página
-      let email = "";
-      const scripts = document.querySelectorAll('script[type="application/json"]');
-      scripts.forEach((s) => {
-        const text = s.textContent;
-        const emailMatch = text.match(
-          /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/
+    $("script").each((i, el) => {
+      const content = $(el).html() || "";
+      const emailMatch = content.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g);
+      if (emailMatch) {
+        const filtered = emailMatch.filter(e =>
+          !e.includes("fotocasa") && !e.includes("adevinta") && !e.includes("noreply")
         );
-        if (emailMatch) {
-          const e = emailMatch[0];
-          if (
-            !e.includes("fotocasa") &&
-            !e.includes("adevinta") &&
-            !e.includes("noreply")
-          ) {
-            email = e;
-          }
-        }
-      });
-
-      // Buscar teléfono
-      const phoneEl = document.querySelector(
-        '[class*="re-ContactPhone"], [class*="re-Contact-phone"]'
-      );
-      const phone = phoneEl?.textContent?.trim() || "";
-
-      // Vendedor particular o agencia
-      const agentEl = document.querySelector('[class*="re-Agent-name"]');
-      const agentName = agentEl?.textContent?.trim() || "";
-
-      // Dirección completa
-      const addressEl = document.querySelector(
-        '[class*="re-DetailHeader-address"]'
-      );
-      const address = addressEl?.textContent?.trim() || "";
-
-      // Descripción
-      const descEl = document.querySelector('[class*="re-DetailDescription"]');
-      const description = descEl?.textContent?.trim().slice(0, 500) || "";
-
-      return { email, phone, agentName, address, description };
+        if (filtered.length > 0 && !email) email = filtered[0];
+      }
+      const phoneMatch = content.match(/"phoneNumber"\s*:\s*"(\d+)"/);
+      if (phoneMatch && !phone) phone = "+34" + phoneMatch[1];
+      const nameMatch = content.match(/"contactName"\s*:\s*"([^"]+)"/);
+      if (nameMatch && !contactName) contactName = nameMatch[1];
     });
 
-    await tab.close();
-    res.json({ success: true, ...detail });
+    res.json({ success: true, email, phone, contactName });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
-  } finally {
-    if (browser) await browser.close();
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`[Scraper] Servidor activo en puerto ${PORT}`);
+  console.log(`[Scraper] ✅ Activo en puerto ${PORT}`);
 });
+
